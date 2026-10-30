@@ -1,0 +1,131 @@
+#!/bin/sh
+# pathfinder: copy the absolute or relative path of files to the clipboard.
+#
+# Usage: pathfinder absolute|relative [--print] PATH...
+#
+# Relative paths are relative to the root of the enclosing Git repository
+# (the nearest parent containing .git). Outside a repository they are
+# relative to your home folder. Outside your home folder the absolute path
+# is used. Several paths are joined with newlines.
+
+set -u
+
+# Finder services run with no locale, which makes pbcopy mangle non-ASCII
+# characters. Force UTF-8.
+export LC_ALL="${PATHFINDER_LOCALE:-en_US.UTF-8}"
+
+usage() {
+	echo "usage: pathfinder absolute|relative [--print] PATH..." >&2
+	exit 2
+}
+
+[ $# -ge 1 ] || usage
+mode=$1
+shift
+case $mode in
+	absolute|abs) mode=absolute ;;
+	relative|rel) mode=relative ;;
+	*) usage ;;
+esac
+
+print_only=0
+if [ "${1:-}" = "--print" ]; then
+	print_only=1
+	shift
+fi
+[ $# -ge 1 ] || usage
+
+# Make a path absolute without resolving symlinks, and drop trailing slashes.
+absolutize() {
+	p=$1
+	case $p in
+		/*) ;;
+		*) p="$(pwd)/$p" ;;
+	esac
+	while [ "${#p}" -gt 1 ] && [ "${p%/}" != "$p" ]; do
+		p=${p%/}
+	done
+	# Collapse "/./" segments.
+	while :; do
+		case $p in
+			*/./*) p=$(printf '%s' "$p" | sed 's#/\./#/#') ;;
+			*/.) p=${p%/.} ;;
+			*) break ;;
+		esac
+	done
+	[ -n "$p" ] || p=/
+	printf '%s' "$p"
+}
+
+# Print the nearest ancestor of $1 (excluding $1 itself) that contains .git.
+find_repo_root() {
+	d=$1
+	while [ "$d" != "/" ] && [ -n "$d" ]; do
+		d=$(dirname -- "$d")
+		if [ -e "$d/.git" ]; then
+			printf '%s' "$d"
+			return 0
+		fi
+	done
+	return 1
+}
+
+relativize() {
+	p=$1
+	# The search starts at the parent, so selecting a repository folder
+	# itself never yields an empty path.
+	if root=$(find_repo_root "$p"); then
+		if [ "$root" = "/" ]; then
+			printf '%s' "${p#/}"
+		else
+			printf '%s' "${p#"$root"/}"
+		fi
+		return
+	fi
+	home=${HOME%/}
+	if [ -n "$home" ] && [ "$home" != "/" ]; then
+		case $p in
+			"$home"/*) printf '%s' "${p#"$home"/}"; return ;;
+		esac
+	fi
+	printf '%s' "$p"
+}
+
+copy_to_clipboard() {
+	if command -v pbcopy >/dev/null 2>&1; then
+		pbcopy
+	elif [ -n "${WAYLAND_DISPLAY:-}" ] && command -v wl-copy >/dev/null 2>&1; then
+		wl-copy
+	elif command -v xclip >/dev/null 2>&1; then
+		xclip -selection clipboard
+	elif command -v xsel >/dev/null 2>&1; then
+		xsel --clipboard --input
+	elif command -v clip.exe >/dev/null 2>&1; then
+		clip.exe
+	else
+		echo "pathfinder: no clipboard tool found (install wl-clipboard, xclip or xsel)" >&2
+		return 1
+	fi
+}
+
+out=""
+first=1
+for arg in "$@"; do
+	p=$(absolutize "$arg")
+	if [ "$mode" = relative ]; then
+		p=$(relativize "$p")
+	fi
+	if [ $first -eq 1 ]; then
+		out=$p
+		first=0
+	else
+		out="$out
+$p"
+	fi
+done
+
+if [ $print_only -eq 1 ]; then
+	printf '%s\n' "$out"
+else
+	printf '%s' "$out" | copy_to_clipboard
+fi
